@@ -1,0 +1,344 @@
+// Thiet lap khai bao thu vien xe tu hanh - Self driving car
+//----------------------------------------------------------------------------------------------------
+#include <opencv2/opencv.hpp>
+#include <raspicam_cv.h>
+#include <iostream>
+#include <chrono>
+#include <wiringPi.h>
+// Thiet lap khai bao khong gian ten - Self driving car
+//----------------------------------------------------------------------------------------------------
+using namespace std;
+using namespace cv;
+using namespace raspicam;
+
+//-----------------------------------------------------------------------------------------------------
+// Thiet lap khai bao ten bien - IMAGE PROCESSING VARIABLES
+Mat frame, Matrix, framePers, frameGray, frameThresh, frameEdge, frameFinal, frameFinalDuplicate, frameFinalDuplicate1;
+Mat ROILane, ROILaneEnd;
+int LeftLanePos, RightLanePos, frameCenter, laneCenter, Result, laneEnd;
+
+RaspiCam_Cv Camera;
+
+stringstream ss;
+// Thiet lap khai bao thu vien vector - Self driving car
+//----------------------------------------------------------------------------------------------------
+vector<int> histrogramLane;
+vector<int> histrogramLaneEnd;
+Point2f landuong1[] = {Point2f(25,160),Point2f(335,160),Point2f(0,210), Point2f(360, 210)}; // Ve lang duong tren khung hinh
+Point2f landuong2[] = {Point2f(60,0),Point2f(300,0),Point2f(60,240), Point2f(300, 240)}; // duong lane
+
+
+// Machine Leaning Variables
+CascadeClassifier Stop_Cascade;
+Mat frame_stop, RoI_Stop, gray_Stop;
+vector<Rect> Stop;
+int dist_stop;
+
+//-----------------------------------------------------------------------------------------------------------------------------------------
+// Thiet lap camera 
+ void Setup ( int argc,char **argv, RaspiCam_Cv &Camera )
+  {
+    Camera.set ( CAP_PROP_FRAME_WIDTH,  ( "-w",argc,argv,400 ) );        // Thiết lập độ cao rong khung hinh -w = 400
+    Camera.set ( CAP_PROP_FRAME_HEIGHT,  ( "-h",argc,argv,240 ) );       // Thiết lập độ cao khung hình (frame height) -h=240
+    Camera.set ( CAP_PROP_BRIGHTNESS, ( "-br",argc,argv,50 ) );         // Thiết lập độ sáng (brightness) của camera dựa trên tham số dòng lệnh -br =50
+    Camera.set ( CAP_PROP_CONTRAST ,( "-co",argc,argv,50 ) );           // Thiết lập độ tương phản (contrast) của camera dựa trên tham số dòng lệnh -co.
+    Camera.set ( CAP_PROP_SATURATION,  ( "-sa",argc,argv,50 ) );        // Thiết lập độ bão hòa màu (saturation) của camera dựa trên tham số dòng lệnh -sa.
+    Camera.set ( CAP_PROP_GAIN,  ( "-g",argc,argv ,50 ) );              // Thiết lập độ gia tăng (gain) của camera dựa trên tham số dòng lệnh -g.
+    Camera.set ( CAP_PROP_FPS,  ( "-fps",argc,argv,0));                //Thiết lập số khung hình trên giây (FPS) của camera dựa trên tham số dòng lệnh -fps.
+}
+
+//-------------------------------------------------------------------------------------------------------------------
+// Thiet lap duowng tu giac tren khung hinh anh (frame)--------------------------------------------------------------
+void Perspective()
+{
+    line(frame,landuong1[0], landuong1[1], Scalar(0,0,255), 1); //  Vẽ một đoạn thẳng từ điểm landuong1[0] đến landuong1[1] trên hình ảnh frame với màu đỏ (Scalar(0,0,255)) và độ rộng là 1 pixel.
+    line(frame,landuong1[1], landuong1[3], Scalar(0,0,255), 1); 
+    line(frame,landuong1[3], landuong1[2], Scalar(0,0,255), 1);
+    line(frame,landuong1[2], landuong1[0], Scalar(0,0,255), 1);
+    
+
+    Matrix = getPerspectiveTransform(landuong1, landuong2); //  tạo ra một ma trận biến đổi (transformation matrix) để thực hiện biến đổi góc nhìn (perspective transformation) từ một hình tứ giác landuong1 sang một hình tứ giác landuong2.
+    warpPerspective(frame, framePers, Matrix, Size(400,240)); // warpPerspective để áp dụng biến đổi này lên một hình ảnh cụ thể. warpPerspective(inputImage, transformedImage, Matrix, outputSize);
+    }
+    
+//----------------------------------------------------------------------------------------------------------------------------------------------
+// Thiet lap  một hình ảnh kết hợp của vùng quan trọng dựa trên ngưỡng và biên của hình ảnh ban đầu
+void Threshold()
+{
+    cvtColor(framePers, frameGray, COLOR_RGB2GRAY);  // Dòng này chuyển đổi hình ảnh từ không gian màu RGB sang không gian màu xám (grayscale). Kết quả của việc này là framePers sau khi chuyển đổi được lưu vào biến frameGray
+    inRange(frameGray, 200, 255, frameThresh); // Dòng này thực hiện một phép toán ngưỡng (thresholding) trên hình ảnh xám frameGray. Nó tạo ra một hình ảnh nhị phân (frameThresh) trong đó các pixel có giá trị từ 200 đến 255 trong hình ảnh gốc 
+    Canny(frameGray, frameEdge, 600, 700, 3, false); // Dòng này thực hiện phát hiện biên (edge detection) trên hình ảnh xám frameGray bằng thuật toán Canny. Kết quả được lưu vào frameEdge. Thuật toán Canny giúp xác định các biên trong hình ảnh, nơi có sự thay đổi đột ngột trong độ sáng.
+    add(frameThresh, frameEdge, frameFinal);
+    cvtColor(frameFinal, frameFinal, COLOR_GRAY2RGB); 
+    cvtColor(frameFinal, frameFinalDuplicate, COLOR_RGB2BGR); //used in histrogram funtion only
+    cvtColor(frameFinal, frameFinalDuplicate1, COLOR_RGB2BGR); //used in histrogram funtion only
+    }
+
+void Capture() //xuat hinh anh
+{
+    Camera.grab();
+    Camera.retrieve(frame); //xuat hinh anh thuc te
+     cvtColor(frame, frame_stop, COLOR_BGR2RGB);
+     //cvtColor(frame, frame, COLOR_BGR2RGB); //chuyen doi mau
+    cvtColor(frame, frame_stop, COLOR_BGR2RGB);
+    }
+
+void Histrogram()
+{
+    histrogramLane.resize(400);  //  Dòng này thay đổi kích thước của vector 
+    histrogramLane.clear();     // Dòng này xóa tất cả các phần tử hiện có trong vector 
+    
+    for(int i=0; i<400; i++) //frame.size().width < 400
+    {
+        ROILane = frameFinalDuplicate(Rect(i,140,1,100));
+        divide(255, ROILane, ROILane);
+        histrogramLane.push_back((int)(sum(ROILane)[0]));
+    }
+    
+    
+        histrogramLaneEnd.resize(400);  //  Dòng này thay đổi kích thước của vector 
+        histrogramLaneEnd.clear();     // Dòng này xóa tất cả các phần tử hiện có trong vector 
+    
+    for(int i=0; i<400; i++) //frame.size().width < 400
+    {
+        ROILaneEnd = frameFinalDuplicate1(Rect(i,0,1,240));
+        divide(255, ROILaneEnd, ROILaneEnd);
+        histrogramLaneEnd.push_back((int)(sum(ROILaneEnd)[0]));
+    }
+    
+        laneEnd = sum(histrogramLaneEnd)[0];
+        cout<<"Ket thuc lane ="<<laneEnd<<endl;
+}
+
+void LaneFinder()
+{
+    vector<int>:: iterator LeftPtr;
+    LeftPtr = max_element(histrogramLane.begin(), histrogramLane.begin() + 150);
+    LeftLanePos = distance(histrogramLane.begin(), LeftPtr);
+    
+    vector<int>:: iterator RightPtr;
+    RightPtr = max_element(histrogramLane.begin() +250, histrogramLane.end());
+    RightLanePos = distance(histrogramLane.begin(), RightPtr);
+    
+    line(frameFinal, Point2f(LeftLanePos, 0), Point2f(LeftLanePos, 240), Scalar(0,225,0), 2);
+    line(frameFinal, Point2f(RightLanePos, 0), Point2f(RightLanePos, 240), Scalar(0,225,0),2); 
+    }
+    
+void LaneCenter()
+{
+    laneCenter = (RightLanePos - LeftLanePos)/2 + LeftLanePos;
+    frameCenter = 190;
+    
+    line(frameFinal, Point2f(laneCenter,0), Point2f(laneCenter,240), Scalar(0,255,0), 3);
+    line(frameFinal, Point2f(frameCenter,0), Point2f(frameCenter,240), Scalar(255,0,0), 3);
+     
+    Result = laneCenter-frameCenter;
+    }
+    
+    
+void Stop_dung()
+{
+    if(!Stop_Cascade.load("//home/don/Desktop/Test Camera//Stop_cascade.xml"))
+    {
+        printf("khong ket noi file");
+        }
+        RoI_Stop = frame_stop(Rect(200,0,200,140));
+       // cvtColor(RoI_Stop, gray_Stop, COLOR_RGB2GRAY);
+        equalizeHist(gray_Stop, gray_Stop);
+        Stop_Cascade.detectMultiScale(gray_Stop, Stop);
+        
+        for (int i=0; i<Stop.size(); i++)
+        {
+            Point P1(Stop[i].x, Stop[i].y);
+            Point P2(Stop[i].x + Stop[i].width, Stop[i].x + Stop[i].height);
+            
+            
+            rectangle(RoI_Stop, P1,  P2, Scalar(0, 0, 255), 2);
+            putText(RoI_Stop, "Stop Sign", P1, FONT_HERSHEY_PLAIN, 1, Scalar(0, 0, 255), 2);
+            dist_stop = (-1.07)*(P2.x-P1.x) +102.597;
+            
+            ss.str(".");
+            ss.clear();
+            ss<<"D = "<<dist_stop<<"cm";
+            putText(RoI_Stop, ss.str(), Point2f(1,130), 0,1, Scalar(0,0,255), 2);
+            }
+    }
+//--------------------------------------------------------------------------------------------------------------------   
+// CHUONG TRINH DIEU KHIEN XE TU LAI SELF - DRIVING CAR
+int main(int argc,char **argv)
+{
+    wiringPiSetup();
+    pinMode(21, OUTPUT);
+    pinMode(22, OUTPUT);
+    pinMode(23, OUTPUT);
+    pinMode(24, OUTPUT);
+    
+    Setup(argc, argv, Camera);
+    cout <<"Ket noi Camera"<<endl; // print ket noi camera
+    if (!Camera.open()) //nieu camera khong ket noi
+    {
+        cout<<"Ket noi Camera loi"<<endl; // print ket noi camera loi
+        return -1; //xuat ra bien -1
+        }
+    cout<<"Camera Id = " <<Camera.getId()<<endl;
+    
+    
+    
+    
+    
+    while(1)
+    {
+    auto start = std::chrono::steady_clock::now();
+    
+    Capture();
+    Perspective();
+    Threshold();
+    Histrogram();
+    LaneFinder();
+    LaneCenter();
+    Stop_dung();
+    
+    if (laneEnd > 3000)
+    {
+        digitalWrite(21, 1);
+        digitalWrite(22, 1);    //decimal = 7
+        digitalWrite(23, 1);
+        digitalWrite(24, 0);
+        cout<<"Ket thuc duong"<<endl;
+    }
+    
+    if (Result ==0)
+    {
+        digitalWrite(21, 0);
+        digitalWrite(22, 0);    //decimal = 0
+        digitalWrite(23, 0);
+        digitalWrite(24, 0);
+        cout<<"re phai 1"<<endl;
+    }
+    
+    else if (Result >0 && Result <10)
+    {
+        digitalWrite(21, 1);
+        digitalWrite(22, 0);    //decimal = 1
+        digitalWrite(23, 0);
+        digitalWrite(24, 0);
+        cout<<"re phai 2"<<endl;
+    }
+    
+        else if (Result >10 && Result <20)
+    {
+        digitalWrite(21, 0);
+        digitalWrite(22, 1);    //decimal = 2
+        digitalWrite(23, 0);
+        digitalWrite(24, 0);
+        cout<<"re phai 3"<<endl;
+    }
+    
+        else if (Result >20)
+    {
+        digitalWrite(21, 1);
+        digitalWrite(22, 1);    //decimal = 3
+        digitalWrite(23, 0);
+        digitalWrite(24, 0);
+        cout<<"re phai 4"<<endl; 
+    }
+    
+
+    else if (Result <0 && Result >-10)
+    {
+        digitalWrite(21, 1);
+        digitalWrite(22, 0);    //decimal = 4
+        digitalWrite(23, 0);
+        digitalWrite(24, 0);
+        cout<<"re trai 2"<<endl;
+    }
+    
+        else if (Result <=-10 && Result >-20)
+    {
+        digitalWrite(21, 0);
+        digitalWrite(22, 1);    //decimal = 5
+        digitalWrite(23, 0);
+        digitalWrite(24, 0);
+        cout<<"re trai 3"<<endl;
+    }
+    
+        else if (Result <-20)
+    {
+        digitalWrite(21, 1);
+        digitalWrite(22, 1);    //decimal = 6
+        digitalWrite(23, 0);
+        digitalWrite(24, 0);
+        cout<<"re trai 4"<<endl;
+    }
+    
+    
+    if (laneEnd >3000)
+    {
+    
+    ss.str(".");
+    ss.clear();
+    ss<<"ket thuc ";
+    putText(frame, ss.str(), Point2f(1,25), 0,1, Scalar(255,0,0), 2);
+    }
+    
+    else if (laneEnd ==0)
+    {
+    
+    ss.str(".");
+    ss.clear();
+    ss<<"Ket qua="<<Result<<"(Tien)";
+    putText(frame, ss.str(), Point2f(1,25), 0,1, Scalar(0,0,255), 2);
+    }
+    
+     else if (Result > 0)
+    {
+    
+    ss.str(".");
+    ss.clear();
+    ss<<"Ket qua="<<Result<<"(Re Phai)";
+    putText(frame, ss.str(), Point2f(1,25), 0,1, Scalar(0,0,255), 2);
+    }
+    
+    else if (Result < 0)
+    {
+    
+    ss.str(".");
+    ss.clear();
+    ss<<"Ket qua="<<Result<<"(Re trai)";
+    putText(frame, ss.str(), Point2f(1,25), 0,1, Scalar(0,0,255), 2);
+    }
+    
+//-------------------------------------------------------------------------------------------------------------------------    
+// Thiet lap xuat hinh anh goc, vị trí tọa độ (10, 100) trên màn hình, thay doi khung hinh kich thuoc cua so "resizeWindow"
+    namedWindow("Ban goc", WINDOW_KEEPRATIO);
+    moveWindow( "Ban goc", 20, 100);
+    resizeWindow("Ban goc", 640, 480);
+    imshow("Ban goc", frame); //xuat hinh anh camera
+    
+    namedWindow("landuong2", WINDOW_KEEPRATIO);
+    moveWindow( "landuong2", 700, 100);
+    resizeWindow("landuong2", 400, 240);
+    imshow("landuong2", frameThresh);
+    
+    namedWindow("GRAY", WINDOW_KEEPRATIO);
+    moveWindow( "GRAY", 1050, 100);
+    resizeWindow("GRAY", 400, 240);
+    imshow("GRAY", frameFinal);
+    
+    namedWindow("Stop Sign", WINDOW_KEEPRATIO);
+    moveWindow( "Stop Sign", 700, 360);
+    resizeWindow("Stop Sign", 400, 240);
+    imshow("Stop Sign", RoI_Stop);
+    
+   // imshow("khung hinh anh", frame);//xuat hinh anh camera
+    waitKey(1);
+    auto end = std::chrono::steady_clock::now();
+    std::chrono::duration<double> elapsed_seconds = end-start;
+    float t = elapsed_seconds.count ();
+    int FPS = 1/t; //toc do khung hinh tren giau (Frames Per Second)
+    
+    cout<<"FPS = "<<FPS<<endl;
+    }
+    return 0;
+    
+    } 
